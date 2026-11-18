@@ -1,0 +1,29 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - name: Prepare web files
+        run: |
+          mkdir -p www
+          cp index.html manifest.json sw.js icon.svg www/
+          echo "@tailwind base;@tailwind components;@tailwind utilities;" > in.css
+          npx -y tailwindcss@3.4.17 -i in.css -o www/tailwind.css --minify -c tailwind.config.js
+          sed -i 's#<script src="https://cdn.tailwindcss.com/3.4.17"></script>#<link rel="stylesheet" href="tailwind.css">#' www/index.html
+          sed -i '/tailwind.config=/d' www/index.html
+      - run: npm install
+      - run: npx cap add android
+      - run: npx cap sync android
+      - run: cd android && chmod +x gradlew && ./gradlew assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AccountVault-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
