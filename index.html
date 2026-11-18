@@ -51,7 +51,7 @@ input[type=date]{color-scheme:dark}
 
 <script>
 const KEY='accountVault.v1';
-let accounts=[],filter='all',query='',checking=false;
+let shown=[],accounts=[],filter='all',query='',checking=false;
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const load=()=>{try{accounts=JSON.parse(localStorage.getItem(KEY))||[]}catch(e){accounts=[]}};
@@ -72,6 +72,7 @@ function render(){
   let rows=accounts.filter(a=>(filter==='all'||(filter==='mat'?matured(a):a.status===filter))&&(!q||[a.name,a.email,a.buyer].some(v=>(v||'').toLowerCase().includes(q))));
   const rank={dead:0,unchecked:1,live:2};
   rows.sort((a,b)=>rank[a.status]-rank[b.status]||(a.name||'').localeCompare(b.name||''));
+  shown=rows;
   $('#list').innerHTML=rows.length?rows.map(card).join(''):`<div class="text-center text-slate-400 py-16">${accounts.length?'No accounts match this view.':'No accounts yet.<br>Tap “+ Add Account” to store your first one.'}</div>`;
 }
 function badge(s){const m={live:['LIVE','bg-green-500/15 text-green-400 border-green-500/40'],dead:['DEAD / RESTRICTED','bg-red-500/15 text-red-400 border-red-500/40'],unchecked:['UNCHECKED','bg-slate-500/15 text-slate-300 border-slate-500/40']}[s]||[];return `<span class="text-xs font-bold px-2 py-1 rounded-lg border ${m[1]}">${m[0]}</span>`}
@@ -155,6 +156,7 @@ function menu(){
    <button class="btn w-full" id="xJson">Export JSON backup</button>
    <button class="btn w-full" id="xCsv">Export CSV</button>
    <button class="btn w-full" id="iJson">Import JSON backup</button>
+   <button class="btn w-full" id="cpAll">Copy links (current view) for Messenger</button>
    <button class="btn w-full" id="setBtn">Check settings</button>
    <button class="btn w-full" onclick="closeSheet()">Close</button></div>`);
   $('#xJson').onclick=()=>dl('vault-backup-'+today()+'.json',JSON.stringify(accounts,null,2),'application/json');
@@ -165,6 +167,7 @@ function menu(){
   };
   $('#iJson').onclick=()=>$('#file').click();
   $('#setBtn').onclick=settingsSheet;
+  $('#cpAll').onclick=()=>{const l=shown.map(a=>a.url).filter(Boolean);if(!l.length){toast('No links in this view');return}copy(l.join('\n'),l.length+' links');closeSheet()};
 }
 const today=()=>new Date().toISOString().slice(0,10);
 function dl(n,t,type){const u=URL.createObjectURL(new Blob([t],{type}));const l=document.createElement('a');l.href=u;l.download=n;l.click();setTimeout(()=>URL.revokeObjectURL(u),1000);toast('Exported')}
@@ -181,20 +184,27 @@ $('#file').addEventListener('change',async e=>{
 });
 
 // checker
-const SK='accountVault.settings',DEF={delay:5,jitter:2,retries:2,timeout:15,blocked:'keep'};
+const SK='accountVault.settings',DEF={delay:5,jitter:2,retries:2,timeout:15,blocked:'keep',method:'preview'},lastTitle='';
 let S={...DEF};try{S={...DEF,...JSON.parse(localStorage.getItem(SK)||'{}')}}catch(e){}
 const isNative=()=>!!(window.Capacitor&&window.Capacitor.isNativePlatform&&window.Capacitor.isNativePlatform());
 async function fetchT(url,ms){const c=new AbortController(),t=setTimeout(()=>c.abort(),ms);try{return await fetch(url,{signal:c.signal})}finally{clearTimeout(t)}}
 async function getPage(url){
   const ms=S.timeout*1000;
   const H=window.Capacitor&&window.Capacitor.Plugins&&window.Capacitor.Plugins.CapacitorHttp;
-  if(isNative()&&H){const r=await H.get({url,connectTimeout:ms,readTimeout:ms,headers:{'User-Agent':'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36','Accept-Language':'en-US,en;q=0.9'}});return{code:r.status,body:typeof r.data==='string'?r.data:''}}
+  if(isNative()&&H){const r=await H.get({url,connectTimeout:ms,readTimeout:ms,headers:{'User-Agent':S.method==='browser'?'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36':'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)','Accept-Language':'en-US,en;q=0.9'}});return{code:r.status,body:typeof r.data==='string'?r.data:''}}
   const tries=[async()=>{const j=await (await fetchT('https://api.allorigins.win/get?url='+encodeURIComponent(url),ms)).json();return{code:(j.status&&j.status.http_code)||0,body:j.contents||''}},
                async()=>{const r=await fetchT('https://corsproxy.io/?'+encodeURIComponent(url),ms);return{code:r.status,body:await r.text()}}];
   let last;for(const t of tries){try{return await t()}catch(e){last=e}}throw last||new Error('proxy');
 }
 function classify(code,body){
   const t=(body||'').toLowerCase();
+  if(code===404||code===410)return'dead';
+  if(S.method!=='browser'&&isNative()&&code===200){
+    const m=body.match(/<meta[^>]+property=["']og:title["'][^>]*content=["']([^"']*)/i)||body.match(/content=["']([^"']*)["'][^>]*property=["']og:title["']/i);
+    const ti=m&&m[1].trim();
+    if(ti&&!/^(linkedin|sign up|log ?in)|page not found/i.test(ti)){lastTitle=ti;return'live'}
+    return ti?'dead':'blocked';
+  }
   if(code===404||code===410||/page not found|this page doesn.t exist|profile is not available|has been restricted/.test(t))return'dead';
   if(code===999||code===429||/authwall|sign in to view|captcha|challenge/.test(t))return'blocked';
   if(code===200)return'live';
@@ -204,7 +214,7 @@ function classify(code,body){
 async function checkOne(a,single){
   if(!a.url){if(single)toast('No profile URL');return'error'}
   const el=document.querySelector(`[data-id="${a.id}"] [data-act=check]`);if(el)el.textContent='…';
-  let res='error',code=0;
+  let res='error',code=0;lastTitle='';
   for(let i=0;i<=S.retries;i++){
     try{
       if(!navigator.onLine)throw new Error('offline');
@@ -214,7 +224,7 @@ async function checkOne(a,single){
     }catch(e){res='error'}
     if(i<S.retries)await sleep(Math.pow(2,i)*3000+(code===429?10000:0));
   }
-  if(res==='live'){a.status='live';a.note=''}
+  if(res==='live'){a.status='live';a.note=lastTitle?'Preview: '+lastTitle:''}
   else if(res==='dead'){a.status='dead';a.note=`HTTP ${code} — wrong? use the Live/Dead switch`}
   else if(res==='blocked'){if(S.blocked==='dead')a.status='dead';a.note=`Blocked by site (HTTP ${code}) — set status manually`}
   else a.note='Check failed (network/proxy) — try again later';
@@ -244,14 +254,15 @@ async function checkAll(){
 }
 function settingsSheet(){
   sheet(`<h2 class="text-lg font-bold mb-1">Check settings</h2><p class="text-xs text-slate-400 mb-4">Slower is safer. Minimum delay is 3 seconds.</p><div class="space-y-3 text-sm">
+   <label class="block">Check method<select id="sM" class="in mt-1"><option value="preview">Link-preview (like Messenger) — APK only</option><option value="browser">Browser-style</option></select></label>
    <label class="block">Delay between checks (seconds)<input id="sD" class="in mt-1" type="number" min="3" value="${S.delay}"></label>
    <label class="block">Random extra delay (0–N seconds)<input id="sJ" class="in mt-1" type="number" min="0" value="${S.jitter}"></label>
    <label class="block">Retries on failure<input id="sR" class="in mt-1" type="number" min="0" max="5" value="${S.retries}"></label>
    <label class="block">Timeout per request (seconds)<input id="sT" class="in mt-1" type="number" min="5" value="${S.timeout}"></label>
    <label class="block">If site blocks the check (999 / login wall)<select id="sB" class="in mt-1"><option value="keep">Keep current status (recommended)</option><option value="dead">Mark as DEAD</option></select></label>
    <div class="flex gap-3 pt-2"><button class="btn flex-1" onclick="closeSheet()">Cancel</button><button id="sS" class="btn flex-1 !bg-amber !text-black !border-amber">Save</button></div></div>`);
-  $('#sB').value=S.blocked;
-  $('#sS').onclick=()=>{S={delay:Math.max(3,+$('#sD').value||5),jitter:Math.max(0,+$('#sJ').value||0),retries:Math.min(5,Math.max(0,+$('#sR').value||0)),timeout:Math.max(5,+$('#sT').value||15),blocked:$('#sB').value};
+  $('#sB').value=S.blocked;$('#sM').value=S.method;
+  $('#sS').onclick=()=>{S={delay:Math.max(3,+$('#sD').value||5),jitter:Math.max(0,+$('#sJ').value||0),retries:Math.min(5,Math.max(0,+$('#sR').value||0)),timeout:Math.max(5,+$('#sT').value||15),blocked:$('#sB').value,method:$('#sM').value};
     try{localStorage.setItem(SK,JSON.stringify(S))}catch(e){}closeSheet();toast('Settings saved')};
 }
 
